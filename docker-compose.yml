@@ -1,0 +1,11 @@
+version: "3.9"
+services:
+  es:
+    image: elasticsearch:8.2.2
+    ports:
+      - "19200:9200"
+      - "19300:9300"
+    environment:
+      - discovery.type=single-node
+volumes:
+  logvolume01: {}
