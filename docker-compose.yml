@@ -1,11 +1,9 @@
-version: "3.9"
 services:
-  es:
-    image: elasticsearch:8.2.2
+  ms:
+    image: getmeili/meilisearch:v1.0
     ports:
-      - "19200:9200"
-      - "19300:9300"
-    environment:
-      - discovery.type=single-node
+      - "7700:7700"
+    volumes:
+      - meili-data:/meili_data
 volumes:
-  logvolume01: {}
+  meili-data: {}
