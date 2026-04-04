@@ -267,6 +267,7 @@ post "/api/index" do
     result = do_index(uri)
     result.to_json
   rescue => e
+    $stderr.puts "#{e.class}: #{e.message}\n#{e.backtrace.join("\n")}"
     halt 500, { error: e.message }.to_json
   end
 end
@@ -475,7 +476,6 @@ function exitIndexMode() {
   input.classList.remove("ring-2", "ring-green-500");
   input.classList.add("focus:ring-blue-500");
   hideResults();
-  showStatus("");
 }
 
 async function doIndex(uri) {
