@@ -1,9 +1,0 @@
-services:
-  ms:
-    image: getmeili/meilisearch:v1.0
-    ports:
-      - "7700:7700"
-    volumes:
-      - meili-data:/meili_data
-volumes:
-  meili-data: {}
