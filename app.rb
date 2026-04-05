@@ -223,6 +223,7 @@ get "/manifest.json" do
     name: "doko",
     short_name: "doko",
     start_url: "/",
+    scope: "/",
     display: "standalone",
     background_color: "#030712",
     theme_color: "#030712",
@@ -501,7 +502,7 @@ function renderItems() {
       const a = document.createElement("a");
       a.href = item.uri;
       a.target = "_blank";
-      a.rel = "noopener";
+      a.rel = "noopener noreferrer";
       a.className = "block px-4 py-3 flex-1 min-w-0";
       a.addEventListener("click", (e) => e.stopPropagation());
 
@@ -567,11 +568,19 @@ function updateSelection() {
   }
 }
 
+function openExternal(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.click();
+}
+
 function activateItem(idx) {
   const item = items[idx];
   if (!item) return;
   if (item.type === "result") {
-    window.open(item.uri, "_blank");
+    openExternal(item.uri);
   } else if (item.type === "index-url") {
     doIndex(item.uri);
   } else if (item.type === "index-prompt") {
