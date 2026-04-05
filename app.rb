@@ -214,6 +214,66 @@ get "/" do
   erb :index
 end
 
+get "/manifest.json" do
+  content_type :json
+  {
+    name: "doko",
+    short_name: "doko",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#030712",
+    theme_color: "#030712",
+    icons: [
+      { src: "/icon.svg", sizes: "any", type: "image/svg+xml" }
+    ]
+  }.to_json
+end
+
+get "/icon.svg" do
+  content_type "image/svg+xml"
+  <<~SVG
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+      <rect width="512" height="512" rx="96" fill="#030712"/>
+      <text x="256" y="330" font-family="system-ui,sans-serif" font-size="240" font-weight="bold" fill="#60a5fa" text-anchor="middle">d</text>
+    </svg>
+  SVG
+end
+
+get "/sw.js" do
+  content_type "application/javascript"
+  <<~JS
+    const CACHE = "doko-v1";
+    const PRECACHE = ["/", "/icon.svg"];
+
+    self.addEventListener("install", (e) => {
+      e.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE)));
+      self.skipWaiting();
+    });
+
+    self.addEventListener("activate", (e) => {
+      e.waitUntil(
+        caches.keys().then((keys) =>
+          Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+        )
+      );
+      self.clients.claim();
+    });
+
+    self.addEventListener("fetch", (e) => {
+      if (e.request.method !== "GET") return;
+      const url = new URL(e.request.url);
+      if (url.pathname.startsWith("/api/")) return;
+      e.respondWith(
+        fetch(e.request).then((res) => {
+          const clone = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, clone));
+          return res;
+        }).catch(() => caches.match(e.request))
+      );
+    });
+  JS
+end
+
 get "/api/search" do
   content_type :json
   q = params[:q].to_s.strip
@@ -279,14 +339,20 @@ __END__
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#030712">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
   <title>doko</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     mark { background: #facc15; color: #111; border-radius: 2px; padding: 0 1px; }
   </style>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col items-center pt-24">
+<body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col items-center pt-24" style="padding-top: max(6rem, env(safe-area-inset-top, 0px) + 2rem);">
   <h1 class="text-4xl font-bold mb-8 tracking-tight">doko</h1>
   <div id="app" class="w-full max-w-2xl px-4 relative">
     <input id="q" type="text" autofocus placeholder="検索..."
@@ -522,6 +588,10 @@ function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js");
 }
 </script>
 </body>
