@@ -364,7 +364,7 @@ __END__
 
 @@index
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -383,7 +383,7 @@ __END__
 <body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col items-center pt-24" style="padding-top: max(6rem, env(safe-area-inset-top, 0px) + 2rem);">
   <h1 class="text-4xl font-bold mb-8 tracking-tight">doko</h1>
   <div id="app" class="w-full max-w-2xl px-4 relative">
-    <input id="q" type="text" autofocus placeholder="検索..."
+    <input id="q" type="text" autofocus placeholder="Search..."
            class="w-full px-4 py-3 rounded-lg bg-gray-900 border border-gray-700
                   text-white text-lg focus:outline-none focus:ring-2 focus:ring-blue-500
                   placeholder-gray-500">
@@ -391,12 +391,12 @@ __END__
     <div id="error-popup" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div class="bg-gray-900 border border-red-500 rounded-lg shadow-2xl max-w-lg w-full mx-4">
         <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-          <span class="text-red-400 font-semibold">エラー</span>
+          <span class="text-red-400 font-semibold">Error</span>
           <button id="error-close" class="text-gray-400 hover:text-white text-xl leading-none">&times;</button>
         </div>
         <pre id="error-msg" class="px-4 py-3 text-sm text-red-300 whitespace-pre-wrap break-all max-h-64 overflow-auto select-all"></pre>
         <div class="px-4 py-3 border-t border-gray-700 flex justify-end">
-          <button id="error-copy" class="px-3 py-1 text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 rounded">コピー</button>
+          <button id="error-copy" class="px-3 py-1 text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 rounded">Copy</button>
         </div>
       </div>
     </div>
@@ -523,7 +523,7 @@ function renderItems() {
       const delBtn = document.createElement("button");
       delBtn.className = "px-3 py-3 text-gray-500 hover:text-red-400 shrink-0";
       delBtn.innerHTML = "&times;";
-      delBtn.title = "削除";
+      delBtn.title = "Delete";
       delBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         doDelete(item.uri, item.title || item.uri);
@@ -535,15 +535,15 @@ function renderItems() {
       const div = document.createElement("div");
       div.className = "px-4 py-3 flex items-center gap-2";
       div.innerHTML = '<span class="text-green-400 text-lg">+</span>' +
-        '<span class="text-gray-200"><span class="text-green-400 font-medium">' +
-        escapeHtml(item.uri) + '</span> をインデックスに追加</span>';
+        '<span class="text-gray-200">Index <span class="text-green-400 font-medium">' +
+        escapeHtml(item.uri) + '</span></span>';
       li.appendChild(div);
       li.addEventListener("click", () => doIndex(item.uri));
     } else if (item.type === "index-prompt") {
       const div = document.createElement("div");
       div.className = "px-4 py-3 flex items-center gap-2";
       div.innerHTML = '<span class="text-green-400 text-lg">+</span>' +
-        '<span class="text-gray-400">新しいURLをインデックスする...</span>';
+        '<span class="text-gray-400">Index a URL...</span>';
       li.appendChild(div);
       li.addEventListener("click", () => enterIndexMode());
     }
@@ -591,7 +591,7 @@ function activateItem(idx) {
 function enterIndexMode() {
   mode = "index-input";
   input.value = "";
-  input.placeholder = "インデックスするURLを入力... (Escで戻る)";
+  input.placeholder = "URL to index... (Esc to cancel)";
   input.classList.add("ring-2", "ring-green-500");
   input.classList.remove("focus:ring-blue-500");
   hideResults();
@@ -600,14 +600,14 @@ function enterIndexMode() {
 function exitIndexMode() {
   mode = "search";
   input.value = "";
-  input.placeholder = "検索...";
+  input.placeholder = "Search...";
   input.classList.remove("ring-2", "ring-green-500");
   input.classList.add("focus:ring-blue-500");
   hideResults();
 }
 
 async function doIndex(uri) {
-  showStatus("インデックス中...");
+  showStatus("Indexing...");
   hideResults();
   try {
     const res = await fetch("/api/index", {
@@ -617,13 +617,13 @@ async function doIndex(uri) {
     });
     const data = await res.json();
     if (!res.ok) {
-      showError(data.error || "不明なエラー");
+      showError(data.error || "Unknown error");
       return;
     }
     if (data.status === "unchanged") {
-      showStatus("変更なし: " + (data.title || uri));
+      showStatus("Unchanged: " + (data.title || uri));
     } else {
-      showStatus("インデックス完了: " + (data.title || uri) + " (" + data.chunks + " chunks)");
+      showStatus("Indexed: " + (data.title || uri) + " (" + data.chunks + " chunks)");
     }
     if (mode === "index-input") exitIndexMode();
     else { input.value = ""; }
@@ -633,7 +633,7 @@ async function doIndex(uri) {
 }
 
 async function doDelete(uri, title) {
-  if (!confirm(title + " を削除しますか？")) return;
+  if (!confirm("Delete " + title + "?")) return;
   try {
     const res = await fetch("/api/index", {
       method: "DELETE",
@@ -642,10 +642,10 @@ async function doDelete(uri, title) {
     });
     const data = await res.json();
     if (!res.ok) {
-      showError(data.error || "不明なエラー");
+      showError(data.error || "Unknown error");
       return;
     }
-    showStatus("削除完了: " + title);
+    showStatus("Deleted: " + title);
     doSearch();
   } catch (e) {
     showError(e.message);
