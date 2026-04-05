@@ -11,8 +11,7 @@ require "pathname"
 require "digest"
 require "time"
 require "net/http"
-require "rexml/document"
-require "rexml/xpath"
+require "nokogiri"
 
 DATA_DIR = File.expand_path("~/.local/share/doko")
 DB_PATH  = File.join(DATA_DIR, "data.sqlite3")
@@ -117,10 +116,9 @@ def read_and_extract_body_by_uri(uri_str, raw)
 end
 
 def extract_text_from_xml(str)
-  doc = REXML::Document.new(str)
-  buf = +""
-  REXML::XPath.each(doc, "//text()") { |t| buf << t.to_s }
-  normalize_text(buf)
+  doc = Nokogiri::HTML5(str)
+  doc.css("script, style").each(&:remove)
+  normalize_text(doc.text)
 end
 
 def normalize_text(s)
@@ -186,7 +184,12 @@ def do_index(uri_str)
 
     source_id = $db.get_first_value("SELECT id FROM sources WHERE uri=:uri", uri: uri)
 
-    $db.execute("DELETE FROM docs_fts WHERE rowid IN (SELECT id FROM docs WHERE source_id=:sid)", sid: source_id)
+    $db.execute(<<~SQL, sid: source_id)
+      INSERT INTO docs_fts(docs_fts, rowid, content, title, uri)
+      SELECT 'delete', d.id, d.content, s.title, s.uri
+      FROM docs d JOIN sources s ON s.id = d.source_id
+      WHERE d.source_id = :sid
+    SQL
     $db.execute("DELETE FROM docs WHERE source_id=:sid", sid: source_id)
 
     chunks.each_with_index do |txt, idx|
