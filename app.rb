@@ -218,8 +218,9 @@ get "/" do
 end
 
 get "/manifest.json" do
-  content_type :json
+  content_type "application/manifest+json"
   {
+    id: "/",
     name: "doko",
     short_name: "doko",
     start_url: "/",
@@ -229,8 +230,9 @@ get "/manifest.json" do
     theme_color: "#030712",
     icons: [
       { src: "/icon.svg", sizes: "any", type: "image/svg+xml" },
-      { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-      { src: "/icon-512.png", sizes: "512x512", type: "image/png" }
+      { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+      { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+      { src: "/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" }
     ]
   }.to_json
 end
@@ -247,6 +249,7 @@ end
 
 ICON_192 = File.binread(File.join(__dir__, "icon-192.png"))
 ICON_512 = File.binread(File.join(__dir__, "icon-512.png"))
+ICON_MASKABLE_512 = File.binread(File.join(__dir__, "icon-maskable-512.png"))
 
 get "/icon-192.png" do
   content_type "image/png"
@@ -256,6 +259,11 @@ end
 get "/icon-512.png" do
   content_type "image/png"
   ICON_512
+end
+
+get "/icon-maskable-512.png" do
+  content_type "image/png"
+  ICON_MASKABLE_512
 end
 
 SW_VERSION = Digest::SHA256.file(File.expand_path(__FILE__)).hexdigest[0, 8]
