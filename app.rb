@@ -442,9 +442,17 @@ get "/api/search" do
   like_rows = $db.execute(like_sql, like: "%#{q}%")
   like_rows.each { |r| rows << r unless seen.include?(r["uri"]) }
 
+  q_lower = q.downcase
+  q_terms = q_lower.split(/\s+/).reject(&:empty?)
+
   rows.each do |r|
     r["snip"] = safe_snippet(r["snip"].to_s)
-    r["keywords"] = r["keywords"] ? JSON.parse(r["keywords"]).map { |e| e["word"] } : []
+    all_keywords = r["keywords"] ? JSON.parse(r["keywords"]).map { |e| e["word"] } : []
+    r["matched_keywords"] = all_keywords.select { |kw|
+      kw_lower = kw.downcase
+      q_terms.any? { |t| kw_lower.include?(t) || t.include?(kw_lower) }
+    }
+    r["keywords"] = all_keywords
   end
   rows.first(20).to_json
 end
@@ -646,7 +654,7 @@ async function doSearch() {
   }
 
   data.forEach(r => {
-    items.push({ type: "result", uri: r.uri, title: r.title, snip: r.snip, keywords: r.keywords || [] });
+    items.push({ type: "result", uri: r.uri, title: r.title, snip: r.snip, keywords: r.keywords || [], matched_keywords: r.matched_keywords || [] });
   });
 
   if (!urlLike && !kwUrl) {
@@ -681,19 +689,33 @@ function renderItems() {
         trackClick(item.uri, item.keywords);
       });
 
+      const q = input.value.trim();
+
       const titleDiv = document.createElement("div");
       titleDiv.className = "font-semibold text-blue-400 truncate";
-      titleDiv.textContent = item.title || item.uri;
+      titleDiv.innerHTML = highlightText(item.title || item.uri, q);
 
       const uriDiv = document.createElement("div");
       uriDiv.className = "text-xs text-gray-500 truncate mt-0.5";
-      uriDiv.textContent = item.uri;
+      uriDiv.innerHTML = highlightText(item.uri, q);
 
       const snipDiv = document.createElement("div");
       snipDiv.className = "text-sm text-gray-300 mt-1 line-clamp-2";
       snipDiv.innerHTML = item.snip || "";
 
       a.append(titleDiv, uriDiv, snipDiv);
+
+      if (item.matched_keywords.length > 0) {
+        const kwDiv = document.createElement("div");
+        kwDiv.className = "flex flex-wrap gap-1 mt-1.5";
+        item.matched_keywords.forEach(kw => {
+          const tag = document.createElement("span");
+          tag.className = "inline-block px-1.5 py-0.5 text-xs rounded bg-yellow-400/20 text-yellow-300";
+          tag.innerHTML = highlightText(kw, q);
+          kwDiv.appendChild(tag);
+        });
+        a.appendChild(kwDiv);
+      }
 
       const delBtn = document.createElement("button");
       delBtn.className = "px-3 py-3 text-gray-500 hover:text-red-400 shrink-0";
@@ -917,6 +939,15 @@ function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+function highlightText(text, query) {
+  if (!query) return escapeHtml(text);
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return escapeHtml(text);
+  const escaped = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp("(" + escaped.join("|") + ")", "gi");
+  return escapeHtml(text).replace(re, "<mark>$1</mark>");
 }
 
 cancelBtn.addEventListener("click", () => exitIndexMode());
