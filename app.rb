@@ -159,7 +159,14 @@ end
 
 def do_index(uri_str)
   uri = canonical_uri(uri_str)
-  raw, mtime = read_resource(uri)
+
+  begin
+    raw, mtime = read_resource(uri)
+  rescue => e
+    raise unless e.message.match?(/\AHTTP \d+/)
+    return do_bookmark(uri, e.message)
+  end
+
   norm = read_and_extract_body_by_uri(uri, raw)
   content_sha = Digest::SHA256.hexdigest(norm)
   title = infer_title(uri, norm)
@@ -210,6 +217,21 @@ def do_index(uri_str)
   end
 
   { status: "indexed", uri: uri, title: title, chunks: chunks.size }
+end
+
+def do_bookmark(uri, error_message)
+  cur = $db.get_first_row("SELECT id FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
+  return { status: "bookmarked", uri: uri, title: uri, error: error_message } if cur
+
+  now = Time.now.to_i
+  empty_sha = Digest::SHA256.hexdigest("")
+
+  $db.execute(<<~SQL, uri: uri, sha: empty_sha, ttl: uri, mt: now, ts: now)
+    INSERT INTO sources(uri, content_sha, title, mtime, last_indexed_at)
+    VALUES(:uri, :sha, :ttl, :mt, :ts)
+  SQL
+
+  { status: "bookmarked", uri: uri, title: uri, error: error_message }
 end
 
 # --- Sinatra Routes ---
@@ -652,6 +674,8 @@ async function doIndex(uri) {
     }
     if (data.status === "unchanged") {
       showStatus("Unchanged: " + (data.title || uri));
+    } else if (data.status === "bookmarked") {
+      showStatus("Bookmarked: " + (data.title || uri) + " (" + data.error + ")");
     } else {
       showStatus("Indexed: " + (data.title || uri) + " (" + data.chunks + " chunks)");
     }
