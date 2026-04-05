@@ -602,6 +602,8 @@ input.addEventListener("input", () => {
 });
 
 input.addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+
   if (e.key === "Escape") {
     if (mode === "index-input") {
       exitIndexMode();
