@@ -15,6 +15,7 @@ require "nokogiri"
 
 DATA_DIR = File.expand_path("~/.local/share/doko")
 DB_PATH  = File.join(DATA_DIR, "data.sqlite3")
+GIT_REVISION = `git -C #{__dir__} rev-parse --short HEAD 2>/dev/null`.strip.freeze
 
 FileUtils.mkdir_p(DATA_DIR)
 $db = SQLite3::Database.new(DB_PATH)
@@ -745,5 +746,9 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js");
 }
 </script>
+  <footer class="fixed bottom-2 right-3 text-xs text-gray-600">
+    <a href="https://github.com/hogelog/doko" target="_blank" rel="noopener noreferrer" class="hover:text-gray-400">doko</a>
+    <span class="ml-1"><%= GIT_REVISION %></span>
+  </footer>
 </body>
 </html>
