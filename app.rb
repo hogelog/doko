@@ -393,7 +393,7 @@ get "/api/search" do
 
   fts_sql = <<~SQL
     WITH ranked AS (
-      SELECT d.id, s.uri, s.title, d.updated_at,
+      SELECT d.id, s.uri, s.title, s.keywords, d.updated_at,
              bm25(docs_fts) AS bm,
              snippet(docs_fts, 0, '<mark>', '</mark>', '…', 20) AS snip,
              ROW_NUMBER() OVER (PARTITION BY s.uri ORDER BY bm25(docs_fts)) AS rn
@@ -402,13 +402,13 @@ get "/api/search" do
       JOIN sources s ON s.id = d.source_id
       WHERE docs_fts MATCH :q
     )
-    SELECT id, uri, title, updated_at, bm, snip
+    SELECT id, uri, title, keywords, updated_at, bm, snip
     FROM ranked WHERE rn = 1
     ORDER BY bm LIMIT 20
   SQL
 
   like_sql = <<~SQL
-    SELECT s.id, s.uri, s.title, s.last_indexed_at AS updated_at, 0 AS bm, '' AS snip
+    SELECT s.id, s.uri, s.title, s.keywords, s.last_indexed_at AS updated_at, 0 AS bm, '' AS snip
     FROM sources s
     WHERE s.uri LIKE :like OR s.title LIKE :like
     ORDER BY s.last_indexed_at DESC
@@ -425,7 +425,10 @@ get "/api/search" do
   like_rows = $db.execute(like_sql, like: "%#{q}%")
   like_rows.each { |r| rows << r unless seen.include?(r["uri"]) }
 
-  rows.each { |r| r["snip"] = safe_snippet(r["snip"].to_s) }
+  rows.each do |r|
+    r["snip"] = safe_snippet(r["snip"].to_s)
+    r["keywords"] = r["keywords"] ? JSON.parse(r["keywords"]).map { |e| e["word"] } : []
+  end
   rows.first(20).to_json
 end
 
@@ -450,16 +453,16 @@ post "/api/click" do
   content_type :json
   body = JSON.parse(request.body.read)
   uri = body["uri"].to_s.strip
-  query = body["query"].to_s.strip
-  halt 400, { error: "uri and query are required" }.to_json if uri.empty? || query.empty?
+  clicked_keywords = Array(body["keywords"]).map(&:strip).reject(&:empty?)
+  halt 400, { error: "uri and keywords are required" }.to_json if uri.empty? || clicked_keywords.empty?
 
   source = $db.get_first_row("SELECT id, title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
   halt 404, { error: "not found" }.to_json unless source
   return { status: "no_keywords" }.to_json if source["keywords"].nil? || source["keywords"].empty?
 
   entries = JSON.parse(source["keywords"])
-  q_down = query.downcase
-  matched = entries.select { |e| w = e["word"].downcase; w.include?(q_down) || q_down.include?(w) }
+  clicked_set = clicked_keywords.to_set
+  matched = entries.select { |e| clicked_set.include?(e["word"]) }
   return { status: "no_match" }.to_json if matched.empty?
 
   matched.each { |e| e["count"] += 1 }
@@ -625,7 +628,7 @@ async function doSearch() {
   }
 
   data.forEach(r => {
-    items.push({ type: "result", uri: r.uri, title: r.title, snip: r.snip });
+    items.push({ type: "result", uri: r.uri, title: r.title, snip: r.snip, keywords: r.keywords || [] });
   });
 
   if (!urlLike && !kwUrl) {
@@ -657,7 +660,7 @@ function renderItems() {
       a.className = "block px-4 py-3 flex-1 min-w-0";
       a.addEventListener("click", (e) => {
         e.stopPropagation();
-        trackClick(item.uri);
+        trackClick(item.uri, item.keywords);
       });
 
       const titleDiv = document.createElement("div");
@@ -731,13 +734,19 @@ function updateSelection() {
   }
 }
 
-function trackClick(uri) {
+function trackClick(uri, keywords) {
   const q = input.value.trim();
-  if (!q || isUrl(q) || parseKeywordUrl(q)) return;
+  if (!q || isUrl(q) || parseKeywordUrl(q) || !keywords || keywords.length === 0) return;
+  const qLower = q.toLowerCase();
+  const matched = keywords.filter(kw => {
+    const kwLower = kw.toLowerCase();
+    return kwLower.includes(qLower) || qLower.includes(kwLower);
+  });
+  if (matched.length === 0) return;
   fetch("/api/click", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uri, query: q })
+    body: JSON.stringify({ uri, query: q, keywords: matched })
   }).catch(() => {});
 }
 
@@ -749,7 +758,7 @@ function activateItem(idx) {
   const item = items[idx];
   if (!item) return;
   if (item.type === "result") {
-    trackClick(item.uri);
+    trackClick(item.uri, item.keywords);
     openExternal(item.uri);
   } else if (item.type === "index-keyword") {
     doIndexWithKeywords(item.uri, item.keywords);
