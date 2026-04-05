@@ -535,7 +535,11 @@ function renderItems() {
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       a.className = "block px-4 py-3 flex-1 min-w-0";
-      a.addEventListener("click", (e) => e.stopPropagation());
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openExternal(item.uri);
+      });
 
       const titleDiv = document.createElement("div");
       titleDiv.className = "font-semibold text-blue-400 truncate";
@@ -599,12 +603,21 @@ function updateSelection() {
   }
 }
 
+const isStandalone = window.matchMedia("(display-mode: standalone)").matches;
+const isAndroid = /android/i.test(navigator.userAgent);
+
 function openExternal(url) {
-  const a = document.createElement("a");
-  a.href = url;
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.click();
+  if (isStandalone && isAndroid) {
+    try {
+      const u = new URL(url);
+      if (u.protocol === "https:" || u.protocol === "http:") {
+        location.href = "intent://" + u.host + u.pathname + u.search + u.hash +
+          "#Intent;scheme=" + u.protocol.slice(0, -1) + ";action=android.intent.action.VIEW;end";
+        return;
+      }
+    } catch (e) {}
+  }
+  window.open(url, "_blank", "noopener");
 }
 
 function activateItem(idx) {
