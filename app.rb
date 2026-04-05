@@ -184,18 +184,22 @@ def merge_keywords(existing_json, new_words)
   entries.to_json
 end
 
-def rebuild_fts_for_source(source_id, title, uri, keywords_json)
+def fts_title_for(title, keywords_json)
   kw_text = keywords_text(keywords_json)
+  kw_text.empty? ? title : "#{title} #{kw_text}"
+end
 
-  $db.execute(<<~SQL, sid: source_id)
+def rebuild_fts_for_source(source_id, title, uri, old_keywords_json, new_keywords_json)
+  old_fts_title = fts_title_for(title, old_keywords_json)
+  $db.execute(<<~SQL, sid: source_id, ttl: old_fts_title, uri: uri)
     INSERT INTO docs_fts(docs_fts, rowid, content, title, uri)
-    SELECT 'delete', d.id, d.content, s.title, s.uri
-    FROM docs d JOIN sources s ON s.id = d.source_id
+    SELECT 'delete', d.id, d.content, :ttl, :uri
+    FROM docs d
     WHERE d.source_id = :sid
   SQL
 
-  fts_title = kw_text.empty? ? title : "#{title} #{kw_text}"
-  $db.execute(<<~SQL, sid: source_id, ttl: fts_title, uri: uri)
+  new_fts_title = fts_title_for(title, new_keywords_json)
+  $db.execute(<<~SQL, sid: source_id, ttl: new_fts_title, uri: uri)
     INSERT INTO docs_fts(rowid, content, title, uri)
     SELECT d.id, d.content, :ttl, :uri
     FROM docs d
@@ -211,10 +215,11 @@ def do_index(uri_str, new_keywords: [])
   if new_keywords.any?
     cur = $db.get_first_row("SELECT id, title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
     if cur
-      merged = merge_keywords(cur["keywords"], new_keywords)
+      old_keywords = cur["keywords"]
+      merged = merge_keywords(old_keywords, new_keywords)
       $db.transaction(:immediate) do
         $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: merged, id: cur["id"])
-        rebuild_fts_for_source(cur["id"], cur["title"], uri, merged)
+        rebuild_fts_for_source(cur["id"], cur["title"], uri, old_keywords, merged)
       end
       return { status: "keywords_updated", uri: uri, title: cur["title"], keywords: JSON.parse(merged) }
     end
@@ -232,8 +237,9 @@ def do_index(uri_str, new_keywords: [])
   title = infer_title(uri, norm)
   chunks = chunk_text(norm)
 
-  cur = $db.get_first_row("SELECT content_sha, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
-  keywords_json = new_keywords.any? ? merge_keywords(cur&.[]("keywords"), new_keywords) : cur&.[]("keywords")
+  cur = $db.get_first_row("SELECT id, content_sha, title AS old_title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
+  old_keywords = cur&.[]("keywords")
+  keywords_json = new_keywords.any? ? merge_keywords(old_keywords, new_keywords) : old_keywords
 
   if cur && cur["content_sha"] == content_sha && new_keywords.empty?
     return { status: "unchanged", uri: uri, title: title }
@@ -242,6 +248,17 @@ def do_index(uri_str, new_keywords: [])
   now = Time.now.to_i
 
   $db.transaction(:immediate) do
+    # Delete old FTS entries using the old keyword-enriched title (before UPSERT changes sources)
+    if cur
+      old_fts_title = fts_title_for(cur["old_title"], old_keywords)
+      $db.execute(<<~SQL, sid: cur["id"], ttl: old_fts_title, uri: uri)
+        INSERT INTO docs_fts(docs_fts, rowid, content, title, uri)
+        SELECT 'delete', d.id, d.content, :ttl, :uri
+        FROM docs d
+        WHERE d.source_id = :sid
+      SQL
+    end
+
     $db.execute(<<~SQL, uri: uri, sha: content_sha, ttl: title, kw: keywords_json, mt: mtime, ts: now)
       INSERT INTO sources(uri, content_sha, title, keywords, mtime, last_indexed_at)
       VALUES(:uri, :sha, :ttl, :kw, :mt, :ts)
@@ -253,14 +270,7 @@ def do_index(uri_str, new_keywords: [])
         last_indexed_at=excluded.last_indexed_at
     SQL
 
-    source_id = $db.get_first_value("SELECT id FROM sources WHERE uri=:uri", uri: uri)
-
-    $db.execute(<<~SQL, sid: source_id)
-      INSERT INTO docs_fts(docs_fts, rowid, content, title, uri)
-      SELECT 'delete', d.id, d.content, s.title, s.uri
-      FROM docs d JOIN sources s ON s.id = d.source_id
-      WHERE d.source_id = :sid
-    SQL
+    source_id = cur ? cur["id"] : $db.get_first_value("SELECT id FROM sources WHERE uri=:uri", uri: uri)
     $db.execute("DELETE FROM docs WHERE source_id=:sid", sid: source_id)
 
     chunks.each_with_index do |txt, idx|
@@ -270,7 +280,14 @@ def do_index(uri_str, new_keywords: [])
       )
     end
 
-    rebuild_fts_for_source(source_id, title, uri, keywords_json)
+    new_fts_title = fts_title_for(title, keywords_json)
+    $db.execute(<<~SQL, sid: source_id, ttl: new_fts_title, uri: uri)
+      INSERT INTO docs_fts(rowid, content, title, uri)
+      SELECT d.id, d.content, :ttl, :uri
+      FROM docs d
+      WHERE d.source_id = :sid
+      ORDER BY d.chunk_index
+    SQL
   end
 
   result = { status: "indexed", uri: uri, title: title, chunks: chunks.size }
@@ -410,7 +427,7 @@ get "/api/search" do
   like_sql = <<~SQL
     SELECT s.id, s.uri, s.title, s.keywords, s.last_indexed_at AS updated_at, 0 AS bm, '' AS snip
     FROM sources s
-    WHERE s.uri LIKE :like OR s.title LIKE :like
+    WHERE s.uri LIKE :like OR s.title LIKE :like OR s.keywords LIKE :like
     ORDER BY s.last_indexed_at DESC
     LIMIT 20
   SQL
@@ -460,7 +477,8 @@ post "/api/click" do
   halt 404, { error: "not found" }.to_json unless source
   return { status: "no_keywords" }.to_json if source["keywords"].nil? || source["keywords"].empty?
 
-  entries = JSON.parse(source["keywords"])
+  old_keywords = source["keywords"]
+  entries = JSON.parse(old_keywords)
   clicked_set = clicked_keywords.to_set
   matched = entries.select { |e| clicked_set.include?(e["word"]) }
   return { status: "no_match" }.to_json if matched.empty?
@@ -470,7 +488,7 @@ post "/api/click" do
 
   $db.transaction(:immediate) do
     $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: updated_json, id: source["id"])
-    rebuild_fts_for_source(source["id"], source["title"], uri, updated_json)
+    rebuild_fts_for_source(source["id"], source["title"], uri, old_keywords, updated_json)
   end
 
   { status: "ok", uri: uri, updated: matched.map { |e| e["word"] } }.to_json
