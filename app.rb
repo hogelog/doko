@@ -450,19 +450,27 @@ post "/api/click" do
   content_type :json
   body = JSON.parse(request.body.read)
   uri = body["uri"].to_s.strip
-  keyword = body["keyword"].to_s.strip
-  halt 400, { error: "uri and keyword are required" }.to_json if uri.empty? || keyword.empty?
+  query = body["query"].to_s.strip
+  halt 400, { error: "uri and query are required" }.to_json if uri.empty? || query.empty?
 
   source = $db.get_first_row("SELECT id, title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
   halt 404, { error: "not found" }.to_json unless source
+  return { status: "no_keywords" }.to_json if source["keywords"].nil? || source["keywords"].empty?
 
-  merged = merge_keywords(source["keywords"], [keyword])
+  entries = JSON.parse(source["keywords"])
+  q_down = query.downcase
+  matched = entries.select { |e| w = e["word"].downcase; w.include?(q_down) || q_down.include?(w) }
+  return { status: "no_match" }.to_json if matched.empty?
+
+  matched.each { |e| e["count"] += 1 }
+  updated_json = entries.to_json
+
   $db.transaction(:immediate) do
-    $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: merged, id: source["id"])
-    rebuild_fts_for_source(source["id"], source["title"], uri, merged)
+    $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: updated_json, id: source["id"])
+    rebuild_fts_for_source(source["id"], source["title"], uri, updated_json)
   end
 
-  { status: "ok", uri: uri, keyword: keyword }.to_json
+  { status: "ok", uri: uri, updated: matched.map { |e| e["word"] } }.to_json
 end
 
 delete "/api/index" do
@@ -729,7 +737,7 @@ function trackClick(uri) {
   fetch("/api/click", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uri, keyword: q })
+    body: JSON.stringify({ uri, query: q })
   }).catch(() => {});
 }
 
