@@ -29,6 +29,7 @@ $db.execute_batch(<<~SQL)
     uri TEXT UNIQUE NOT NULL,
     content_sha TEXT NOT NULL,
     title TEXT,
+    keywords TEXT,
     mtime INTEGER NOT NULL,
     last_indexed_at INTEGER NOT NULL,
     deleted_at INTEGER
@@ -50,6 +51,13 @@ $db.execute_batch(<<~SQL)
     content = ''
   );
 SQL
+
+# Migration: add keywords column to existing sources table
+begin
+  $db.execute("SELECT keywords FROM sources LIMIT 0")
+rescue SQLite3::SQLException
+  $db.execute("ALTER TABLE sources ADD COLUMN keywords TEXT")
+end
 
 # --- Helpers from ref.rb ---
 
@@ -157,8 +165,60 @@ def safe_snippet(html)
   html
 end
 
-def do_index(uri_str)
+def keywords_text(keywords)
+  return "" if keywords.nil? || keywords.empty?
+  entries = JSON.parse(keywords)
+  entries.flat_map { |e| Array.new(e["count"], e["word"]) }.join(" ")
+end
+
+def merge_keywords(existing_json, new_words)
+  entries = existing_json ? JSON.parse(existing_json) : []
+  new_words.each do |word|
+    entry = entries.find { |e| e["word"] == word }
+    if entry
+      entry["count"] += 1
+    else
+      entries << { "word" => word, "count" => 1 }
+    end
+  end
+  entries.to_json
+end
+
+def rebuild_fts_for_source(source_id, title, uri, keywords_json)
+  kw_text = keywords_text(keywords_json)
+
+  $db.execute(<<~SQL, sid: source_id)
+    INSERT INTO docs_fts(docs_fts, rowid, content, title, uri)
+    SELECT 'delete', d.id, d.content, s.title, s.uri
+    FROM docs d JOIN sources s ON s.id = d.source_id
+    WHERE d.source_id = :sid
+  SQL
+
+  fts_title = kw_text.empty? ? title : "#{title} #{kw_text}"
+  $db.execute(<<~SQL, sid: source_id, ttl: fts_title, uri: uri)
+    INSERT INTO docs_fts(rowid, content, title, uri)
+    SELECT d.id, d.content, :ttl, :uri
+    FROM docs d
+    WHERE d.source_id = :sid
+    ORDER BY d.chunk_index
+  SQL
+end
+
+def do_index(uri_str, new_keywords: [])
   uri = canonical_uri(uri_str)
+
+  # Handle keyword-only update (source already exists, no re-fetch needed)
+  if new_keywords.any?
+    cur = $db.get_first_row("SELECT id, title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
+    if cur
+      merged = merge_keywords(cur["keywords"], new_keywords)
+      $db.transaction(:immediate) do
+        $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: merged, id: cur["id"])
+        rebuild_fts_for_source(cur["id"], cur["title"], uri, merged)
+      end
+      return { status: "keywords_updated", uri: uri, title: cur["title"], keywords: JSON.parse(merged) }
+    end
+  end
 
   begin
     raw, mtime = read_resource(uri)
@@ -172,20 +232,23 @@ def do_index(uri_str)
   title = infer_title(uri, norm)
   chunks = chunk_text(norm)
 
-  cur = $db.get_first_row("SELECT content_sha FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
-  if cur && cur["content_sha"] == content_sha
+  cur = $db.get_first_row("SELECT content_sha, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
+  keywords_json = new_keywords.any? ? merge_keywords(cur&.[]("keywords"), new_keywords) : cur&.[]("keywords")
+
+  if cur && cur["content_sha"] == content_sha && new_keywords.empty?
     return { status: "unchanged", uri: uri, title: title }
   end
 
   now = Time.now.to_i
 
   $db.transaction(:immediate) do
-    $db.execute(<<~SQL, uri: uri, sha: content_sha, ttl: title, mt: mtime, ts: now)
-      INSERT INTO sources(uri, content_sha, title, mtime, last_indexed_at)
-      VALUES(:uri, :sha, :ttl, :mt, :ts)
+    $db.execute(<<~SQL, uri: uri, sha: content_sha, ttl: title, kw: keywords_json, mt: mtime, ts: now)
+      INSERT INTO sources(uri, content_sha, title, keywords, mtime, last_indexed_at)
+      VALUES(:uri, :sha, :ttl, :kw, :mt, :ts)
       ON CONFLICT(uri) DO UPDATE SET
         content_sha=excluded.content_sha,
         title=excluded.title,
+        keywords=excluded.keywords,
         mtime=excluded.mtime,
         last_indexed_at=excluded.last_indexed_at
     SQL
@@ -207,16 +270,12 @@ def do_index(uri_str)
       )
     end
 
-    $db.execute(<<~SQL, sid: source_id, ttl: title, uri: uri)
-      INSERT INTO docs_fts(rowid, content, title, uri)
-      SELECT d.id, d.content, :ttl, :uri
-      FROM docs d
-      WHERE d.source_id = :sid
-      ORDER BY d.chunk_index
-    SQL
+    rebuild_fts_for_source(source_id, title, uri, keywords_json)
   end
 
-  { status: "indexed", uri: uri, title: title, chunks: chunks.size }
+  result = { status: "indexed", uri: uri, title: title, chunks: chunks.size }
+  result[:keywords] = JSON.parse(keywords_json) if keywords_json
+  result
 end
 
 def do_bookmark(uri, error_message)
@@ -376,8 +435,10 @@ post "/api/index" do
   uri = body["uri"].to_s.strip
   halt 400, { error: "uri is required" }.to_json if uri.empty?
 
+  new_keywords = Array(body["keywords"]).map(&:strip).reject(&:empty?)
+
   begin
-    result = do_index(uri)
+    result = do_index(uri, new_keywords: new_keywords)
     result.to_json
   rescue => e
     $stderr.puts "#{e.class}: #{e.message}\n#{e.backtrace.join("\n")}"
@@ -472,6 +533,12 @@ function isUrl(s) {
   return /^(https?:\/\/|file:\/\/)/.test(s.trim());
 }
 
+function parseKeywordUrl(s) {
+  const m = s.match(/^(.+?)\s+(https?:\/\/\S+|file:\/\/\S+)$/);
+  if (!m) return null;
+  return { keywords: m[1].trim(), uri: m[2].trim() };
+}
+
 input.addEventListener("input", () => {
   if (mode === "index-input") return;
   clearTimeout(timer);
@@ -522,8 +589,11 @@ async function doSearch() {
 
   items = [];
   const urlLike = isUrl(q);
+  const kwUrl = parseKeywordUrl(q);
 
-  if (urlLike) {
+  if (kwUrl) {
+    items.push({ type: "index-keyword", uri: kwUrl.uri, keywords: kwUrl.keywords });
+  } else if (urlLike) {
     items.push({ type: "index-url", uri: q.trim() });
   }
 
@@ -531,7 +601,7 @@ async function doSearch() {
     items.push({ type: "result", uri: r.uri, title: r.title, snip: r.snip });
   });
 
-  if (!urlLike) {
+  if (!urlLike && !kwUrl) {
     items.push({ type: "index-prompt" });
   }
 
@@ -585,6 +655,15 @@ function renderItems() {
 
       wrapper.append(a, delBtn);
       li.appendChild(wrapper);
+    } else if (item.type === "index-keyword") {
+      const div = document.createElement("div");
+      div.className = "px-4 py-3 flex items-center gap-2";
+      div.innerHTML = '<span class="text-green-400 text-lg">+</span>' +
+        '<span class="text-gray-200">Index <span class="text-green-400 font-medium">' +
+        escapeHtml(item.uri) + '</span> with keyword <span class="text-yellow-400 font-medium">' +
+        escapeHtml(item.keywords) + '</span></span>';
+      li.appendChild(div);
+      li.addEventListener("click", () => doIndexWithKeywords(item.uri, item.keywords));
     } else if (item.type === "index-url") {
       const div = document.createElement("div");
       div.className = "px-4 py-3 flex items-center gap-2";
@@ -631,6 +710,8 @@ function activateItem(idx) {
   if (!item) return;
   if (item.type === "result") {
     openExternal(item.uri);
+  } else if (item.type === "index-keyword") {
+    doIndexWithKeywords(item.uri, item.keywords);
   } else if (item.type === "index-url") {
     doIndex(item.uri);
   } else if (item.type === "index-prompt") {
@@ -681,6 +762,35 @@ async function doIndex(uri) {
     }
     if (mode === "index-input") exitIndexMode();
     else { input.value = ""; }
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function doIndexWithKeywords(uri, keywords) {
+  showStatus("Indexing with keywords...");
+  hideResults();
+  try {
+    const res = await fetch("/api/index", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uri, keywords: keywords.split(/\s+/) })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showError(data.error || "Unknown error");
+      return;
+    }
+    if (data.status === "keywords_updated") {
+      showStatus("Keywords updated: " + (data.title || uri));
+    } else if (data.status === "unchanged") {
+      showStatus("Unchanged: " + (data.title || uri));
+    } else if (data.status === "bookmarked") {
+      showStatus("Bookmarked: " + (data.title || uri) + " (" + data.error + ")");
+    } else {
+      showStatus("Indexed: " + (data.title || uri) + " (" + data.chunks + " chunks)");
+    }
+    input.value = "";
   } catch (e) {
     showError(e.message);
   }
