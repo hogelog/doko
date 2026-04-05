@@ -360,6 +360,18 @@ __END__
                   text-white text-lg focus:outline-none focus:ring-2 focus:ring-blue-500
                   placeholder-gray-500">
     <div id="status" class="mt-2 text-sm text-gray-400 hidden"></div>
+    <div id="error-popup" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div class="bg-gray-900 border border-red-500 rounded-lg shadow-2xl max-w-lg w-full mx-4">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+          <span class="text-red-400 font-semibold">エラー</span>
+          <button id="error-close" class="text-gray-400 hover:text-white text-xl leading-none">&times;</button>
+        </div>
+        <pre id="error-msg" class="px-4 py-3 text-sm text-red-300 whitespace-pre-wrap break-all max-h-64 overflow-auto select-all"></pre>
+        <div class="px-4 py-3 border-t border-gray-700 flex justify-end">
+          <button id="error-copy" class="px-3 py-1 text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 rounded">コピー</button>
+        </div>
+      </div>
+    </div>
     <ul id="results" class="mt-1 bg-gray-900 border border-gray-700 rounded-lg overflow-hidden shadow-xl hidden">
     </ul>
   </div>
@@ -555,7 +567,7 @@ async function doIndex(uri) {
     });
     const data = await res.json();
     if (!res.ok) {
-      showStatus("エラー: " + (data.error || "不明なエラー"), true);
+      showError(data.error || "不明なエラー");
       return;
     }
     if (data.status === "unchanged") {
@@ -566,16 +578,31 @@ async function doIndex(uri) {
     if (mode === "index-input") exitIndexMode();
     else { input.value = ""; }
   } catch (e) {
-    showStatus("エラー: " + e.message, true);
+    showError(e.message);
   }
 }
 
-function showStatus(msg, isError) {
+const errorPopup = document.getElementById("error-popup");
+const errorMsg = document.getElementById("error-msg");
+document.getElementById("error-close").addEventListener("click", () => errorPopup.classList.add("hidden"));
+errorPopup.addEventListener("click", (e) => { if (e.target === errorPopup) errorPopup.classList.add("hidden"); });
+document.getElementById("error-copy").addEventListener("click", () => {
+  navigator.clipboard.writeText(errorMsg.textContent);
+});
+
+function showError(msg) {
+  errorMsg.textContent = msg;
+  errorPopup.classList.remove("hidden");
+}
+
+let hideTimer = null;
+function showStatus(msg) {
+  clearTimeout(hideTimer);
   if (!msg) { statusEl.classList.add("hidden"); return; }
   statusEl.textContent = msg;
-  statusEl.className = "mt-2 text-sm " + (isError ? "text-red-400" : "text-green-400");
+  statusEl.className = "mt-2 text-sm text-green-400";
   statusEl.classList.remove("hidden");
-  if (!isError) setTimeout(() => statusEl.classList.add("hidden"), 4000);
+  hideTimer = setTimeout(() => statusEl.classList.add("hidden"), 4000);
 }
 
 function hideResults() {
