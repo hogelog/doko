@@ -335,6 +335,30 @@ post "/api/index" do
   end
 end
 
+delete "/api/index" do
+  content_type :json
+  body = JSON.parse(request.body.read)
+  uri = body["uri"].to_s.strip
+  halt 400, { error: "uri is required" }.to_json if uri.empty?
+
+  source = $db.get_first_row("SELECT id FROM sources WHERE uri=:uri", uri: uri)
+  halt 404, { error: "not found" }.to_json unless source
+
+  sid = source["id"]
+  $db.transaction(:immediate) do
+    $db.execute(<<~SQL, sid: sid)
+      INSERT INTO docs_fts(docs_fts, rowid, content, title, uri)
+      SELECT 'delete', d.id, d.content, s.title, s.uri
+      FROM docs d JOIN sources s ON s.id = d.source_id
+      WHERE d.source_id = :sid
+    SQL
+    $db.execute("DELETE FROM docs WHERE source_id=:sid", sid: sid)
+    $db.execute("DELETE FROM sources WHERE id=:sid", sid: sid)
+  end
+
+  { status: "deleted", uri: uri }.to_json
+end
+
 __END__
 
 @@index
@@ -471,11 +495,14 @@ function renderItems() {
     li.className = "cursor-pointer transition-colors duration-75";
 
     if (item.type === "result") {
+      const wrapper = document.createElement("div");
+      wrapper.className = "flex items-start hover:bg-gray-800";
+
       const a = document.createElement("a");
       a.href = item.uri;
       a.target = "_blank";
       a.rel = "noopener";
-      a.className = "block px-4 py-3 hover:bg-gray-800";
+      a.className = "block px-4 py-3 flex-1 min-w-0";
       a.addEventListener("click", (e) => e.stopPropagation());
 
       const titleDiv = document.createElement("div");
@@ -491,7 +518,18 @@ function renderItems() {
       snipDiv.innerHTML = item.snip || "";
 
       a.append(titleDiv, uriDiv, snipDiv);
-      li.appendChild(a);
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "px-3 py-3 text-gray-500 hover:text-red-400 shrink-0";
+      delBtn.innerHTML = "&times;";
+      delBtn.title = "削除";
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        doDelete(item.uri, item.title || item.uri);
+      });
+
+      wrapper.append(a, delBtn);
+      li.appendChild(wrapper);
     } else if (item.type === "index-url") {
       const div = document.createElement("div");
       div.className = "px-4 py-3 flex items-center gap-2";
@@ -580,6 +618,26 @@ async function doIndex(uri) {
     }
     if (mode === "index-input") exitIndexMode();
     else { input.value = ""; }
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function doDelete(uri, title) {
+  if (!confirm(title + " を削除しますか？")) return;
+  try {
+    const res = await fetch("/api/index", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uri })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showError(data.error || "不明なエラー");
+      return;
+    }
+    showStatus("削除完了: " + title);
+    doSearch();
   } catch (e) {
     showError(e.message);
   }
