@@ -383,10 +383,14 @@ __END__
 <body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col items-center pt-24" style="padding-top: max(6rem, env(safe-area-inset-top, 0px) + 2rem);">
   <h1 class="text-4xl font-bold mb-8 tracking-tight">doko</h1>
   <div id="app" class="w-full max-w-2xl px-4 relative">
-    <input id="q" type="text" autofocus placeholder="Search..."
-           class="w-full px-4 py-3 rounded-lg bg-gray-900 border border-gray-700
-                  text-white text-lg focus:outline-none focus:ring-2 focus:ring-blue-500
-                  placeholder-gray-500">
+    <div class="flex gap-2">
+      <input id="q" type="text" autofocus placeholder="Search..."
+             class="flex-1 min-w-0 px-4 py-3 rounded-lg bg-gray-900 border border-gray-700
+                    text-white text-lg focus:outline-none focus:ring-2 focus:ring-blue-500
+                    placeholder-gray-500">
+      <button id="cancel-btn" class="hidden px-3 py-3 rounded-lg bg-gray-800 border border-gray-600
+                    text-gray-300 hover:text-white hover:bg-gray-700 text-sm shrink-0">Cancel</button>
+    </div>
     <div id="status" class="mt-2 text-sm text-gray-400 hidden"></div>
     <div id="error-popup" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div class="bg-gray-900 border border-red-500 rounded-lg shadow-2xl max-w-lg w-full mx-4">
@@ -400,7 +404,7 @@ __END__
         </div>
       </div>
     </div>
-    <ul id="results" class="mt-1 bg-gray-900 border border-gray-700 rounded-lg overflow-hidden shadow-xl hidden">
+    <ul id="results" class="mt-1 bg-gray-900 border border-gray-700 rounded-lg overflow-y-auto shadow-xl hidden" style="max-height: 60vh;">
     </ul>
   </div>
 
@@ -408,6 +412,7 @@ __END__
 const input = document.getElementById("q");
 const list = document.getElementById("results");
 const statusEl = document.getElementById("status");
+const cancelBtn = document.getElementById("cancel-btn");
 
 let timer = null;
 let items = [];       // {type: "result"|"index-url"|"index-prompt", ...}
@@ -591,9 +596,10 @@ function activateItem(idx) {
 function enterIndexMode() {
   mode = "index-input";
   input.value = "";
-  input.placeholder = "URL to index... (Esc to cancel)";
+  input.placeholder = "URL to index...";
   input.classList.add("ring-2", "ring-green-500");
   input.classList.remove("focus:ring-blue-500");
+  cancelBtn.classList.remove("hidden");
   hideResults();
 }
 
@@ -603,6 +609,7 @@ function exitIndexMode() {
   input.placeholder = "Search...";
   input.classList.remove("ring-2", "ring-green-500");
   input.classList.add("focus:ring-blue-500");
+  cancelBtn.classList.add("hidden");
   hideResults();
 }
 
@@ -686,6 +693,14 @@ function escapeHtml(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+
+cancelBtn.addEventListener("click", () => exitIndexMode());
+
+document.addEventListener("click", (e) => {
+  if (!list.classList.contains("hidden") && !list.contains(e.target) && e.target !== input) {
+    hideResults();
+  }
+});
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js");
