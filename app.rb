@@ -243,10 +243,13 @@ get "/icon.svg" do
   SVG
 end
 
+SW_VERSION = Digest::SHA256.file(File.expand_path(__FILE__)).hexdigest[0, 8]
+
 get "/sw.js" do
   content_type "application/javascript"
+  cache_control :no_cache
   <<~JS
-    const CACHE = "doko-v1";
+    const CACHE = "doko-#{SW_VERSION}";
     const PRECACHE = ["/", "/icon.svg"];
 
     self.addEventListener("install", (e) => {
