@@ -228,7 +228,9 @@ get "/manifest.json" do
     background_color: "#030712",
     theme_color: "#030712",
     icons: [
-      { src: "/icon.svg", sizes: "any", type: "image/svg+xml" }
+      { src: "/icon.svg", sizes: "any", type: "image/svg+xml" },
+      { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { src: "/icon-512.png", sizes: "512x512", type: "image/png" }
     ]
   }.to_json
 end
@@ -241,6 +243,19 @@ get "/icon.svg" do
       <text x="256" y="330" font-family="system-ui,sans-serif" font-size="240" font-weight="bold" fill="#60a5fa" text-anchor="middle">d</text>
     </svg>
   SVG
+end
+
+ICON_192 = File.binread(File.join(__dir__, "icon-192.png"))
+ICON_512 = File.binread(File.join(__dir__, "icon-512.png"))
+
+get "/icon-192.png" do
+  content_type "image/png"
+  ICON_192
+end
+
+get "/icon-512.png" do
+  content_type "image/png"
+  ICON_512
 end
 
 SW_VERSION = Digest::SHA256.file(File.expand_path(__FILE__)).hexdigest[0, 8]
@@ -376,7 +391,7 @@ __END__
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="apple-touch-icon" href="/icon-192.png">
   <title>doko</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
