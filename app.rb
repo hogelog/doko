@@ -640,9 +640,6 @@ async function doSearch() {
   const q = input.value.trim();
   if (!q) { hideResults(); return; }
 
-  const res = await fetch("/api/search?q=" + encodeURIComponent(q));
-  const data = await res.json();
-
   items = [];
   const urlLike = isUrl(q);
   const kwUrl = parseKeywordUrl(q);
@@ -653,9 +650,15 @@ async function doSearch() {
     items.push({ type: "index-url", uri: q.trim() });
   }
 
-  data.forEach(r => {
-    items.push({ type: "result", uri: r.uri, title: r.title, snip: r.snip, keywords: r.keywords || [], matched_keywords: r.matched_keywords || [] });
-  });
+  try {
+    const res = await fetch("/api/search?q=" + encodeURIComponent(q));
+    const data = await res.json();
+    data.forEach(r => {
+      items.push({ type: "result", uri: r.uri, title: r.title, snip: r.snip, keywords: r.keywords || [], matched_keywords: r.matched_keywords || [] });
+    });
+  } catch (e) {
+    // Search API error should not prevent index options from showing
+  }
 
   if (!urlLike && !kwUrl) {
     items.push({ type: "index-prompt" });
