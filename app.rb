@@ -446,6 +446,25 @@ post "/api/index" do
   end
 end
 
+post "/api/click" do
+  content_type :json
+  body = JSON.parse(request.body.read)
+  uri = body["uri"].to_s.strip
+  keyword = body["keyword"].to_s.strip
+  halt 400, { error: "uri and keyword are required" }.to_json if uri.empty? || keyword.empty?
+
+  source = $db.get_first_row("SELECT id, title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
+  halt 404, { error: "not found" }.to_json unless source
+
+  merged = merge_keywords(source["keywords"], [keyword])
+  $db.transaction(:immediate) do
+    $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: merged, id: source["id"])
+    rebuild_fts_for_source(source["id"], source["title"], uri, merged)
+  end
+
+  { status: "ok", uri: uri, keyword: keyword }.to_json
+end
+
 delete "/api/index" do
   content_type :json
   body = JSON.parse(request.body.read)
@@ -628,7 +647,10 @@ function renderItems() {
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       a.className = "block px-4 py-3 flex-1 min-w-0";
-      a.addEventListener("click", (e) => e.stopPropagation());
+      a.addEventListener("click", (e) => {
+        e.stopPropagation();
+        trackClick(item.uri);
+      });
 
       const titleDiv = document.createElement("div");
       titleDiv.className = "font-semibold text-blue-400 truncate";
@@ -701,6 +723,16 @@ function updateSelection() {
   }
 }
 
+function trackClick(uri) {
+  const q = input.value.trim();
+  if (!q || isUrl(q) || parseKeywordUrl(q)) return;
+  fetch("/api/click", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uri, keyword: q })
+  }).catch(() => {});
+}
+
 function openExternal(url) {
   window.open(url, "_blank", "noopener");
 }
@@ -709,6 +741,7 @@ function activateItem(idx) {
   const item = items[idx];
   if (!item) return;
   if (item.type === "result") {
+    trackClick(item.uri);
     openExternal(item.uri);
   } else if (item.type === "index-keyword") {
     doIndexWithKeywords(item.uri, item.keywords);
