@@ -59,6 +59,18 @@ rescue SQLite3::SQLException
   $db.execute("ALTER TABLE sources ADD COLUMN keywords TEXT")
 end
 
+# Migration: add click_score column to existing sources table
+begin
+  $db.execute("SELECT click_score FROM sources LIMIT 0")
+rescue SQLite3::SQLException
+  $db.execute("ALTER TABLE sources ADD COLUMN click_score INTEGER NOT NULL DEFAULT 0")
+  # Backfill click_score from existing keywords JSON
+  $db.execute("SELECT id, keywords FROM sources WHERE keywords IS NOT NULL AND keywords != ''").each do |row|
+    score = JSON.parse(row["keywords"]).sum { |e| e["count"] }
+    $db.execute("UPDATE sources SET click_score=:score WHERE id=:id", score: score, id: row["id"])
+  end
+end
+
 # --- Helpers from ref.rb ---
 
 def canonical_uri(input)
@@ -171,6 +183,11 @@ def keywords_text(keywords)
   entries.flat_map { |e| Array.new(e["count"], e["word"]) }.join(" ")
 end
 
+def compute_click_score(keywords_json)
+  return 0 if keywords_json.nil? || keywords_json.empty?
+  JSON.parse(keywords_json).sum { |e| e["count"] }
+end
+
 def merge_keywords(existing_json, new_words)
   entries = existing_json ? JSON.parse(existing_json) : []
   new_words.each do |word|
@@ -217,8 +234,9 @@ def do_index(uri_str, new_keywords: [])
     if cur
       old_keywords = cur["keywords"]
       merged = merge_keywords(old_keywords, new_keywords)
+      new_click_score = compute_click_score(merged)
       $db.transaction(:immediate) do
-        $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: merged, id: cur["id"])
+        $db.execute("UPDATE sources SET keywords=:kw, click_score=:cs WHERE id=:id", kw: merged, cs: new_click_score, id: cur["id"])
         rebuild_fts_for_source(cur["id"], cur["title"], uri, old_keywords, merged)
       end
       return { status: "keywords_updated", uri: uri, title: cur["title"], keywords: JSON.parse(merged) }
@@ -259,13 +277,15 @@ def do_index(uri_str, new_keywords: [])
       SQL
     end
 
-    $db.execute(<<~SQL, uri: uri, sha: content_sha, ttl: title, kw: keywords_json, mt: mtime, ts: now)
-      INSERT INTO sources(uri, content_sha, title, keywords, mtime, last_indexed_at)
-      VALUES(:uri, :sha, :ttl, :kw, :mt, :ts)
+    new_click_score = compute_click_score(keywords_json)
+    $db.execute(<<~SQL, uri: uri, sha: content_sha, ttl: title, kw: keywords_json, cs: new_click_score, mt: mtime, ts: now)
+      INSERT INTO sources(uri, content_sha, title, keywords, click_score, mtime, last_indexed_at)
+      VALUES(:uri, :sha, :ttl, :kw, :cs, :mt, :ts)
       ON CONFLICT(uri) DO UPDATE SET
         content_sha=excluded.content_sha,
         title=excluded.title,
         keywords=excluded.keywords,
+        click_score=excluded.click_score,
         mtime=excluded.mtime,
         last_indexed_at=excluded.last_indexed_at
     SQL
@@ -426,6 +446,7 @@ get "/api/search" do
     WITH ranked AS (
       SELECT d.id, s.uri, s.title, s.keywords, d.updated_at,
              bm25(docs_fts) AS bm,
+             s.click_score,
              snippet(docs_fts, 0, '<mark>', '</mark>', '…', 20) AS snip,
              ROW_NUMBER() OVER (PARTITION BY s.uri ORDER BY bm25(docs_fts)) AS rn
       FROM docs_fts
@@ -435,7 +456,7 @@ get "/api/search" do
     )
     SELECT id, uri, title, keywords, updated_at, bm, snip
     FROM ranked WHERE rn = 1
-    ORDER BY bm LIMIT 20
+    ORDER BY bm - click_score * 0.5 LIMIT 20
   SQL
 
   like_sql = <<~SQL
@@ -508,8 +529,10 @@ post "/api/click" do
   matched.each { |e| e["count"] += 1 }
   updated_json = entries.to_json
 
+  new_click_score = compute_click_score(updated_json)
+
   $db.transaction(:immediate) do
-    $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: updated_json, id: source["id"])
+    $db.execute("UPDATE sources SET keywords=:kw, click_score=:cs WHERE id=:id", kw: updated_json, cs: new_click_score, id: source["id"])
     rebuild_fts_for_source(source["id"], source["title"], uri, old_keywords, updated_json)
   end
 
