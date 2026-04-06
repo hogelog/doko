@@ -338,7 +338,7 @@ end
 
 get "/opensearch.xml" do
   content_type "application/opensearchdescription+xml"
-  template_url = "#{request.base_url}/" + '#' + "{searchTerms}"
+  template_url = "#{request.base_url}/" + '#q=' + "{searchTerms}"
   <<~XML
     <?xml version="1.0" encoding="UTF-8"?>
     <OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
@@ -639,8 +639,9 @@ function parseKeywordUrl(s) {
 }
 
 // Populate search from URL hash (e.g. from OpenSearch)
-if (location.hash.length > 1) {
-  input.value = decodeURIComponent(location.hash.slice(1));
+const hashParams = new URLSearchParams(location.hash.slice(1));
+if (hashParams.has("q")) {
+  input.value = hashParams.get("q");
   history.replaceState(null, "", "/");
   doSearch();
 }
