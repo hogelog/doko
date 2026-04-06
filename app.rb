@@ -514,29 +514,34 @@ post "/api/click" do
   body = JSON.parse(request.body.read)
   uri = body["uri"].to_s.strip
   clicked_keywords = Array(body["keywords"]).map(&:strip).reject(&:empty?)
-  halt 400, { error: "uri and keywords are required" }.to_json if uri.empty? || clicked_keywords.empty?
+  halt 400, { error: "uri is required" }.to_json if uri.empty?
 
-  source = $db.get_first_row("SELECT id, title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
+  source = $db.get_first_row("SELECT id, title, keywords, click_score FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
   halt 404, { error: "not found" }.to_json unless source
-  return { status: "no_keywords" }.to_json if source["keywords"].nil? || source["keywords"].empty?
 
   old_keywords = source["keywords"]
-  entries = JSON.parse(old_keywords)
-  clicked_set = clicked_keywords.to_set
-  matched = entries.select { |e| clicked_set.include?(e["word"]) }
-  return { status: "no_match" }.to_json if matched.empty?
+  updated_keywords = []
 
-  matched.each { |e| e["count"] += 1 }
-  updated_json = entries.to_json
+  if clicked_keywords.any? && old_keywords && !old_keywords.empty?
+    entries = JSON.parse(old_keywords)
+    clicked_set = clicked_keywords.to_set
+    matched = entries.select { |e| clicked_set.include?(e["word"]) }
+    if matched.any?
+      matched.each { |e| e["count"] += 1 }
+      updated_keywords = matched.map { |e| e["word"] }
+      updated_json = entries.to_json
 
-  new_click_score = compute_click_score(updated_json)
+      $db.transaction(:immediate) do
+        $db.execute("UPDATE sources SET keywords=:kw, click_score=click_score+1 WHERE id=:id", kw: updated_json, id: source["id"])
+        rebuild_fts_for_source(source["id"], source["title"], uri, old_keywords, updated_json)
+      end
 
-  $db.transaction(:immediate) do
-    $db.execute("UPDATE sources SET keywords=:kw, click_score=:cs WHERE id=:id", kw: updated_json, cs: new_click_score, id: source["id"])
-    rebuild_fts_for_source(source["id"], source["title"], uri, old_keywords, updated_json)
+      return { status: "ok", uri: uri, updated: updated_keywords }.to_json
+    end
   end
 
-  { status: "ok", uri: uri, updated: matched.map { |e| e["word"] } }.to_json
+  $db.execute("UPDATE sources SET click_score=click_score+1 WHERE id=:id", id: source["id"])
+  { status: "ok", uri: uri, updated: updated_keywords }.to_json
 end
 
 delete "/api/index" do
@@ -826,17 +831,20 @@ function updateSelection() {
 
 function trackClick(uri, keywords) {
   const q = input.value.trim();
-  if (!q || isUrl(q) || parseKeywordUrl(q) || !keywords || keywords.length === 0) return;
-  const qLower = q.toLowerCase();
-  const matched = keywords.filter(kw => {
-    const kwLower = kw.toLowerCase();
-    return kwLower.includes(qLower) || qLower.includes(kwLower);
-  });
-  if (matched.length === 0) return;
+  if (!q || isUrl(q) || parseKeywordUrl(q)) return;
+  const payload = { uri, query: q };
+  if (keywords && keywords.length > 0) {
+    const qLower = q.toLowerCase();
+    const matched = keywords.filter(kw => {
+      const kwLower = kw.toLowerCase();
+      return kwLower.includes(qLower) || qLower.includes(kwLower);
+    });
+    if (matched.length > 0) payload.keywords = matched;
+  }
   fetch("/api/click", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uri, query: q, keywords: matched })
+    body: JSON.stringify(payload)
   }).catch(() => {});
 }
 
