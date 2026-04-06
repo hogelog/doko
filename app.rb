@@ -316,6 +316,20 @@ get "/" do
   erb :index
 end
 
+get "/opensearch.xml" do
+  content_type "application/opensearchdescription+xml"
+  template_url = "#{request.base_url}/" + '#' + "{searchTerms}"
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8"?>
+    <OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+      <ShortName>doko</ShortName>
+      <Description>doko full-text search</Description>
+      <InputEncoding>UTF-8</InputEncoding>
+      <Url type="text/html" template="#{template_url}"/>
+    </OpenSearchDescription>
+  XML
+end
+
 get "/manifest.json" do
   content_type "application/manifest+json"
   {
@@ -538,6 +552,7 @@ __END__
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="manifest" href="/manifest.json">
+  <link rel="search" type="application/opensearchdescription+xml" title="doko" href="/opensearch.xml">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icon-192.png">
   <title>doko</title>
@@ -593,6 +608,13 @@ function parseKeywordUrl(s) {
   const m = s.match(/^(.+?)\s+(https?:\/\/\S+|file:\/\/\S+)$/);
   if (!m) return null;
   return { keywords: m[1].trim(), uri: m[2].trim() };
+}
+
+// Populate search from URL hash (e.g. from OpenSearch)
+if (location.hash.length > 1) {
+  input.value = decodeURIComponent(location.hash.slice(1));
+  history.replaceState(null, "", "/");
+  doSearch();
 }
 
 input.addEventListener("input", () => {
