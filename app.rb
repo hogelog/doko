@@ -476,7 +476,7 @@ get "/api/search" do
     )
     SELECT id, uri, title, keywords, updated_at, bm, snip
     FROM ranked WHERE rn = 1
-    ORDER BY bm - click_score * 2.0 LIMIT 20
+    ORDER BY bm - click_score * 5.0 LIMIT 20
   SQL
 
   like_sql = <<~SQL
