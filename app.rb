@@ -188,27 +188,6 @@ def compute_click_score(keywords_json)
   JSON.parse(keywords_json).sum { |e| e["count"] }
 end
 
-URL_KEYWORD_STOP_WORDS = %w[
-  www com org net io dev app co jp uk us edu gov
-  http https file ftp
-  html htm php asp aspx jsp
-  edit gid pli index
-  d e p s t
-].to_set.freeze
-
-def extract_url_keywords(uri_str)
-  u = URI.parse(uri_str)
-  parts = []
-  parts.concat(u.host.split(".")) if u.host
-  parts.concat(u.path.split("/")) if u.path
-  parts
-    .map { |p| p.gsub(/[^a-zA-Z0-9\-]/, "") }
-    .reject { |p| p.length <= 2 || p.match?(/\A\h{8,}\z/) || URL_KEYWORD_STOP_WORDS.include?(p.downcase) }
-    .uniq(&:downcase)
-rescue URI::InvalidURIError
-  []
-end
-
 def ensure_keywords(existing_json, words)
   entries = existing_json ? JSON.parse(existing_json) : []
   existing_words = entries.map { |e| e["word"].downcase }.to_set
@@ -259,7 +238,7 @@ end
 
 def do_index(uri_str, new_keywords: [])
   uri = canonical_uri(uri_str)
-  url_keywords = extract_url_keywords(uri)
+  url_keywords = [uri]
 
   # Handle keyword-only update (source already exists, no re-fetch needed)
   if new_keywords.any?
@@ -370,10 +349,8 @@ url_kw_version = $db.get_first_value("SELECT value FROM migrations WHERE key='ur
 unless url_kw_version
   $db.execute("CREATE TABLE IF NOT EXISTS migrations(key TEXT PRIMARY KEY, value TEXT)")
   $db.execute("SELECT id, uri, title, keywords FROM sources").each do |row|
-    url_kw = extract_url_keywords(row["uri"])
-    next if url_kw.empty?
     old_keywords = row["keywords"]
-    updated = ensure_keywords(old_keywords, url_kw)
+    updated = ensure_keywords(old_keywords, [row["uri"]])
     next if updated == (old_keywords || "[]")
     new_cs = compute_click_score(updated)
     $db.transaction(:immediate) do
