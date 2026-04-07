@@ -188,6 +188,38 @@ def compute_click_score(keywords_json)
   JSON.parse(keywords_json).sum { |e| e["count"] }
 end
 
+URL_KEYWORD_STOP_WORDS = %w[
+  www com org net io dev app co jp uk us edu gov
+  http https file ftp
+  html htm php asp aspx jsp
+  edit gid pli index
+  d e p s t
+].to_set.freeze
+
+def extract_url_keywords(uri_str)
+  u = URI.parse(uri_str)
+  parts = []
+  parts.concat(u.host.split(".")) if u.host
+  parts.concat(u.path.split("/")) if u.path
+  parts
+    .map { |p| p.gsub(/[^a-zA-Z0-9\-]/, "") }
+    .reject { |p| p.length <= 2 || p.match?(/\A\h{8,}\z/) || URL_KEYWORD_STOP_WORDS.include?(p.downcase) }
+    .uniq(&:downcase)
+rescue URI::InvalidURIError
+  []
+end
+
+def ensure_keywords(existing_json, words)
+  entries = existing_json ? JSON.parse(existing_json) : []
+  existing_words = entries.map { |e| e["word"].downcase }.to_set
+  words.each do |word|
+    next if existing_words.include?(word.downcase)
+    entries << { "word" => word, "count" => 1 }
+    existing_words << word.downcase
+  end
+  entries.to_json
+end
+
 def merge_keywords(existing_json, new_words)
   entries = existing_json ? JSON.parse(existing_json) : []
   new_words.each do |word|
@@ -227,6 +259,7 @@ end
 
 def do_index(uri_str, new_keywords: [])
   uri = canonical_uri(uri_str)
+  url_keywords = extract_url_keywords(uri)
 
   # Handle keyword-only update (source already exists, no re-fetch needed)
   if new_keywords.any?
@@ -234,6 +267,7 @@ def do_index(uri_str, new_keywords: [])
     if cur
       old_keywords = cur["keywords"]
       merged = merge_keywords(old_keywords, new_keywords)
+      merged = ensure_keywords(merged, url_keywords)
       new_click_score = compute_click_score(merged)
       $db.transaction(:immediate) do
         $db.execute("UPDATE sources SET keywords=:kw, click_score=:cs WHERE id=:id", kw: merged, cs: new_click_score, id: cur["id"])
@@ -258,8 +292,9 @@ def do_index(uri_str, new_keywords: [])
   cur = $db.get_first_row("SELECT id, content_sha, title AS old_title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
   old_keywords = cur&.[]("keywords")
   keywords_json = new_keywords.any? ? merge_keywords(old_keywords, new_keywords) : old_keywords
+  keywords_json = ensure_keywords(keywords_json, url_keywords)
 
-  if cur && cur["content_sha"] == content_sha && new_keywords.empty?
+  if cur && cur["content_sha"] == content_sha && new_keywords.empty? && keywords_json == old_keywords
     return { status: "unchanged", uri: uri, title: title }
   end
 
@@ -328,6 +363,25 @@ def do_bookmark(uri, error_message)
   SQL
 
   { status: "bookmarked", uri: uri, title: uri, error: error_message }
+end
+
+# Migration: backfill URL-derived keywords for existing sources
+url_kw_version = $db.get_first_value("SELECT value FROM migrations WHERE key='url_keywords_v1'") rescue nil
+unless url_kw_version
+  $db.execute("CREATE TABLE IF NOT EXISTS migrations(key TEXT PRIMARY KEY, value TEXT)")
+  $db.execute("SELECT id, uri, title, keywords FROM sources").each do |row|
+    url_kw = extract_url_keywords(row["uri"])
+    next if url_kw.empty?
+    old_keywords = row["keywords"]
+    updated = ensure_keywords(old_keywords, url_kw)
+    next if updated == (old_keywords || "[]")
+    new_cs = compute_click_score(updated)
+    $db.transaction(:immediate) do
+      $db.execute("UPDATE sources SET keywords=:kw, click_score=:cs WHERE id=:id", kw: updated, cs: new_cs, id: row["id"])
+      rebuild_fts_for_source(row["id"], row["title"], row["uri"], old_keywords, updated)
+    end
+  end
+  $db.execute("INSERT INTO migrations(key, value) VALUES('url_keywords_v1', '1')")
 end
 
 # --- Sinatra Routes ---
