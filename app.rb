@@ -177,37 +177,18 @@ def safe_snippet(html)
   html
 end
 
-def keywords_text(keywords)
-  return "" if keywords.nil? || keywords.empty?
-  entries = JSON.parse(keywords)
-  entries.flat_map { |e| Array.new(e["count"], e["word"]) }.join(" ")
-end
-
-def compute_click_score(keywords_json)
-  return 0 if keywords_json.nil? || keywords_json.empty?
-  JSON.parse(keywords_json).sum { |e| e["count"] }
-end
-
-def ensure_keywords(existing_json, words)
-  entries = existing_json ? JSON.parse(existing_json) : []
-  existing_words = entries.map { |e| e["word"].downcase }.to_set
-  words.each do |word|
-    next if existing_words.include?(word.downcase)
-    entries << { "word" => word, "count" => 1 }
-    existing_words << word.downcase
-  end
-  entries.to_json
+def keywords_text(keywords_json)
+  return "" if keywords_json.nil? || keywords_json.empty?
+  JSON.parse(keywords_json).join(" ")
 end
 
 def merge_keywords(existing_json, new_words)
   entries = existing_json ? JSON.parse(existing_json) : []
+  existing_set = entries.map(&:downcase).to_set
   new_words.each do |word|
-    entry = entries.find { |e| e["word"] == word }
-    if entry
-      entry["count"] += 1
-    else
-      entries << { "word" => word, "count" => 1 }
-    end
+    next if existing_set.include?(word.downcase)
+    entries << word
+    existing_set << word.downcase
   end
   entries.to_json
 end
@@ -238,18 +219,15 @@ end
 
 def do_index(uri_str, new_keywords: [])
   uri = canonical_uri(uri_str)
-  url_keywords = [uri]
 
   # Handle keyword-only update (source already exists, no re-fetch needed)
   if new_keywords.any?
     cur = $db.get_first_row("SELECT id, title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
     if cur
       old_keywords = cur["keywords"]
-      merged = merge_keywords(old_keywords, new_keywords)
-      merged = ensure_keywords(merged, url_keywords)
-      new_click_score = compute_click_score(merged)
+      merged = merge_keywords(old_keywords, new_keywords + [uri])
       $db.transaction(:immediate) do
-        $db.execute("UPDATE sources SET keywords=:kw, click_score=:cs WHERE id=:id", kw: merged, cs: new_click_score, id: cur["id"])
+        $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: merged, id: cur["id"])
         rebuild_fts_for_source(cur["id"], cur["title"], uri, old_keywords, merged)
       end
       return { status: "keywords_updated", uri: uri, title: cur["title"], keywords: JSON.parse(merged) }
@@ -270,8 +248,7 @@ def do_index(uri_str, new_keywords: [])
 
   cur = $db.get_first_row("SELECT id, content_sha, title AS old_title, keywords FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
   old_keywords = cur&.[]("keywords")
-  keywords_json = new_keywords.any? ? merge_keywords(old_keywords, new_keywords) : old_keywords
-  keywords_json = ensure_keywords(keywords_json, url_keywords)
+  keywords_json = merge_keywords(old_keywords, new_keywords + [uri])
 
   if cur && cur["content_sha"] == content_sha && new_keywords.empty? && keywords_json == old_keywords
     return { status: "unchanged", uri: uri, title: title }
@@ -291,15 +268,13 @@ def do_index(uri_str, new_keywords: [])
       SQL
     end
 
-    new_click_score = compute_click_score(keywords_json)
-    $db.execute(<<~SQL, uri: uri, sha: content_sha, ttl: title, kw: keywords_json, cs: new_click_score, mt: mtime, ts: now)
-      INSERT INTO sources(uri, content_sha, title, keywords, click_score, mtime, last_indexed_at)
-      VALUES(:uri, :sha, :ttl, :kw, :cs, :mt, :ts)
+    $db.execute(<<~SQL, uri: uri, sha: content_sha, ttl: title, kw: keywords_json, mt: mtime, ts: now)
+      INSERT INTO sources(uri, content_sha, title, keywords, mtime, last_indexed_at)
+      VALUES(:uri, :sha, :ttl, :kw, :mt, :ts)
       ON CONFLICT(uri) DO UPDATE SET
         content_sha=excluded.content_sha,
         title=excluded.title,
         keywords=excluded.keywords,
-        click_score=excluded.click_score,
         mtime=excluded.mtime,
         last_indexed_at=excluded.last_indexed_at
     SQL
@@ -344,21 +319,35 @@ def do_bookmark(uri, error_message)
   { status: "bookmarked", uri: uri, title: uri, error: error_message }
 end
 
-# Migration: backfill URL-derived keywords for existing sources
-url_kw_version = $db.get_first_value("SELECT value FROM migrations WHERE key='url_keywords_v1'") rescue nil
-unless url_kw_version
-  $db.execute("CREATE TABLE IF NOT EXISTS migrations(key TEXT PRIMARY KEY, value TEXT)")
+# Migration: convert keywords from [{word, count}] to simple string array and add URI keyword
+$db.execute("CREATE TABLE IF NOT EXISTS migrations(key TEXT PRIMARY KEY, value TEXT)")
+kw_v2 = $db.get_first_value("SELECT value FROM migrations WHERE key='keywords_simple_array_v1'") rescue nil
+unless kw_v2
   $db.execute("SELECT id, uri, title, keywords FROM sources").each do |row|
     old_keywords = row["keywords"]
-    updated = ensure_keywords(old_keywords, [row["uri"]])
-    next if updated == (old_keywords || "[]")
-    new_cs = compute_click_score(updated)
+    # Convert old format to simple array
+    words = if old_keywords && !old_keywords.empty?
+              parsed = JSON.parse(old_keywords)
+              if parsed.is_a?(Array) && parsed.first.is_a?(Hash)
+                parsed.map { |e| e["word"] }
+              else
+                parsed
+              end
+            else
+              []
+            end
+    # Ensure URI is included as keyword
+    words << row["uri"] unless words.any? { |w| w.downcase == row["uri"].downcase }
+    new_keywords = words.to_json
+
+    next if new_keywords == old_keywords
+
     $db.transaction(:immediate) do
-      $db.execute("UPDATE sources SET keywords=:kw, click_score=:cs WHERE id=:id", kw: updated, cs: new_cs, id: row["id"])
-      rebuild_fts_for_source(row["id"], row["title"], row["uri"], old_keywords, updated)
+      $db.execute("UPDATE sources SET keywords=:kw WHERE id=:id", kw: new_keywords, id: row["id"])
+      rebuild_fts_for_source(row["id"], row["title"], row["uri"], old_keywords, new_keywords)
     end
   end
-  $db.execute("INSERT INTO migrations(key, value) VALUES('url_keywords_v1', '1')")
+  $db.execute("INSERT OR REPLACE INTO migrations(key, value) VALUES('keywords_simple_array_v1', '1')")
 end
 
 # --- Sinatra Routes ---
@@ -487,7 +476,7 @@ get "/api/search" do
     )
     SELECT id, uri, title, keywords, updated_at, bm, snip
     FROM ranked WHERE rn = 1
-    ORDER BY bm - click_score * 0.5 LIMIT 20
+    ORDER BY bm - click_score * 2.0 LIMIT 20
   SQL
 
   like_sql = <<~SQL
@@ -513,7 +502,7 @@ get "/api/search" do
 
   rows.each do |r|
     r["snip"] = safe_snippet(r["snip"].to_s)
-    all_keywords = r["keywords"] ? JSON.parse(r["keywords"]).map { |e| e["word"] } : []
+    all_keywords = r["keywords"] ? JSON.parse(r["keywords"]) : []
     r["matched_keywords"] = all_keywords.select { |kw|
       kw_lower = kw.downcase
       q_terms.any? { |t| kw_lower.include?(t) || t.include?(kw_lower) }
@@ -544,35 +533,13 @@ post "/api/click" do
   content_type :json
   body = JSON.parse(request.body.read)
   uri = body["uri"].to_s.strip
-  clicked_keywords = Array(body["keywords"]).map(&:strip).reject(&:empty?)
   halt 400, { error: "uri is required" }.to_json if uri.empty?
 
-  source = $db.get_first_row("SELECT id, title, keywords, click_score FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
+  source = $db.get_first_row("SELECT id FROM sources WHERE uri=:uri LIMIT 1", uri: uri)
   halt 404, { error: "not found" }.to_json unless source
 
-  old_keywords = source["keywords"]
-  updated_keywords = []
-
-  if clicked_keywords.any? && old_keywords && !old_keywords.empty?
-    entries = JSON.parse(old_keywords)
-    clicked_set = clicked_keywords.to_set
-    matched = entries.select { |e| clicked_set.include?(e["word"]) }
-    if matched.any?
-      matched.each { |e| e["count"] += 1 }
-      updated_keywords = matched.map { |e| e["word"] }
-      updated_json = entries.to_json
-
-      $db.transaction(:immediate) do
-        $db.execute("UPDATE sources SET keywords=:kw, click_score=click_score+1 WHERE id=:id", kw: updated_json, id: source["id"])
-        rebuild_fts_for_source(source["id"], source["title"], uri, old_keywords, updated_json)
-      end
-
-      return { status: "ok", uri: uri, updated: updated_keywords }.to_json
-    end
-  end
-
   $db.execute("UPDATE sources SET click_score=click_score+1 WHERE id=:id", id: source["id"])
-  { status: "ok", uri: uri, updated: updated_keywords }.to_json
+  { status: "ok", uri: uri }.to_json
 end
 
 delete "/api/index" do
